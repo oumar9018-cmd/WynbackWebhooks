@@ -1,0 +1,51 @@
+# Render blueprint for wynback-ingest (free tier web service).
+# Apply from the Render dashboard ("New +" -> "Blueprint") or by
+# connecting this repo as a Web Service manually — DEPLOY.md has the
+# exact click-path. Every env var below is declared WITHOUT a value
+# (sync: false): values are set in the Render dashboard only, never
+# in this repo. The one exception is FIRESTORE_MODE, pinned to
+# firestore so a deploy can never silently boot into memory mode
+# and drop data on restart.
+#
+# Free-tier caveat, stated plainly: Render free web services sleep
+# after inactivity. The outbound watcher poller does NOT keep the
+# service awake (it makes no inbound HTTP traffic), so the first
+# webhook after a sleep pays a cold-start delay (tens of seconds).
+# Inbound webhooks still arrive — Render wakes the service — but
+# nothing here is real-time on the free tier. If that delay ever
+# matters, the fix is a paid instance type, not a code change.
+
+services:
+  - type: web
+    name: wynback-webhooks
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: FIRESTORE_MODE
+        value: firestore
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SHOPIFY_SECRETS_JSON
+        sync: false
+      - key: META_PAGES_JSON
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: INDIAMART_KEYS_JSON
+        sync: false
+      - key: WEBSITE_TOKENS_JSON
+        sync: false
+      - key: OUTBOUND_SUBSCRIPTIONS_JSON
+        sync: false
+      - key: ADMIN_KEY
+        sync: false
+      - key: RATE_LIMIT_PER_MINUTE
+        value: 100
+      - key: MAX_BODY_BYTES
+        value: 1048576
+      - key: WATCHER_POLL_MS
+        value: 15000
