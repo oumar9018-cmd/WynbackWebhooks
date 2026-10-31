@@ -118,3 +118,34 @@ list), `update` (pointer write, delivery marks, dead-letter resolve),
 3. Check Firestore usage in the console for unexpected reads/writes
    during the exposure window. The narrow role bounds the blast
    radius to the five paths above even in the worst case.
+
+## Website tokens minted from the SPA (added 2026-10-31, NOT yet deployed)
+
+The SPA's Settings → API & Webhooks card mints website bearer tokens
+through the service (it never stores secrets itself):
+
+- `POST /api/website-tokens` (Firebase ID token) → 201 with the raw
+  token exactly once; only its sha256 is stored.
+- `GET /api/website-tokens` (Firebase ID token) → the owner's tokens
+  (labels/dates only, never hashes or raw tokens).
+- `DELETE /api/website-tokens/:id` (Firebase ID token) → revoke.
+- `POST /ingest/website` accepts env-map tokens AND minted tokens.
+
+Storage: top-level collection `websiteTokens`, doc id = sha256 of the
+raw token, fields `{ ownerUid, label, createdAt, revoked }`. No
+collectionGroup query is used (one doc get by id — no composite
+index needed).
+
+IAM: NO role change is needed. The existing five permissions already
+cover this collection (create/get/list/update); the code-level
+narrow path grows by exactly one collection (`websiteTokens`), and
+the service still never deletes anything.
+
+Deploy order when this ships: (1) push the service repo, (2) Render
+manual deploy of service `leadback-payment`, (3) push the SPA — the
+card degrades gracefully (endpoints shown, token note) until the new
+service build is live.
+
+Correction to step 1 of the click-path above: the "visible only to
+the oumar9018 account" line is outdated. Since 2026-10-30 the console
+work uses **mohiqbal6864@gmail.com**.

@@ -21,12 +21,16 @@ async function main() {
   let store
   let deliveryStore
   let deadLetters
+  let tokenStore
+  let verifyIdToken = null
   if (config.firestoreMode === 'firestore') {
     // Lazy require: memory-mode runs never need firebase-admin.
     // eslint-disable-next-line global-require
     const { FirestoreStore } = require('./store-firestore')
     // eslint-disable-next-line global-require
     const { FirestoreDeliveryStore, FirestoreDeadLetterQueue } = require('./delivery-firestore')
+    // eslint-disable-next-line global-require
+    const { FirestoreWebsiteTokenStore } = require('./tokens')
     store = new FirestoreStore({
       serviceAccountPath: config.serviceAccountPath,
       serviceAccountJson: config.serviceAccountJson,
@@ -35,10 +39,21 @@ async function main() {
     // letters live in users/{ownerUid}/webhook_deliveries.
     deliveryStore = new FirestoreDeliveryStore({ db: store.db })
     deadLetters = new FirestoreDeadLetterQueue({ db: store.db })
+    // Owner-minted website tokens live in top-level `websiteTokens`
+    // (doc id = token hash). The narrow role's create/get/list/
+    // update permissions already cover this collection.
+    tokenStore = new FirestoreWebsiteTokenStore({ db: store.db })
+    // eslint-disable-next-line global-require
+    const admin = require('firebase-admin')
+    verifyIdToken = token => admin.auth().verifyIdToken(token)
   } else {
     store = new MemoryStore()
     deliveryStore = new MemoryDeliveryStore()
     deadLetters = new DeadLetterQueue()
+    // eslint-disable-next-line global-require
+    const { MemoryWebsiteTokenStore } = require('./tokens')
+    tokenStore = new MemoryWebsiteTokenStore()
+    // No ID-token verifier in memory mode: the /api routes 404.
   }
 
   const watcher = createWatcher({
@@ -48,7 +63,7 @@ async function main() {
     subscriptions: config.subscriptions,
     pollMs: config.watcherPollMs,
   })
-  const server = createServer({ config, store, deadLetters, deliveryStore })
+  const server = createServer({ config, store, deadLetters, deliveryStore, tokenStore, verifyIdToken })
 
   await new Promise(resolve => server.listen(config.port, resolve))
   watcher.start()

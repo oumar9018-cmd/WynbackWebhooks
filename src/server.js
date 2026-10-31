@@ -9,6 +9,13 @@
  *   GET  /health            liveness only — no auth, no data, no version leak
  *   GET  /ops/dead-letters  ADMIN_KEY bearer only (404 when unset)
  *   POST /ops/dead-letters/:id/retry  ADMIN_KEY bearer only
+ *   POST /api/website-tokens   Firebase ID token -> mints one website
+ *     bearer <redacted> (raw token returned once, only its sha256 stored)
+ *   GET  /api/website-tokens   Firebase ID token -> owner's tokens
+ *     (labels/dates only, never hashes or raw tokens)
+ *   DELETE /api/website-tokens/:id  Firebase ID token -> revoke
+ *   The /api routes exist only when an ID-token verifier is wired
+ *   (Firestore mode); otherwise they 404 like any unknown route.
  *
  * Status contract (spec §4/§6):
  *   unknown route/source -> 404 · bad signature/key -> 401, no write
@@ -24,9 +31,11 @@
 'use strict'
 
 const http = require('node:http')
+const crypto = require('node:crypto')
 const { URL } = require('node:url')
 
 const {
+  sha256Hex,
   verifyShopifyHmac,
   verifyMetaHubSignature,
   verifyMetaSignedRequest,
@@ -113,8 +122,62 @@ async function ingestMapped(store, ownerUid, mapped) {
   return { status: 201, body: { id, assignedTo: routing.assignedTo } }
 }
 
-function createServer({ config, store, deadLetters, deliveryStore = null, fetchFn = fetch } = {}) {
+function createServer({ config, store, deadLetters, deliveryStore = null, tokenStore = null, verifyIdToken = null, fetchFn = fetch } = {}) {
   const limiter = createRateLimiter({ perMinute: config.rateLimitPerMinute })
+
+  // Firebase ID-token auth for the owner-facing /api routes. Returns
+  // the uid, or '' when there is no verifier or the token is bad.
+  // Never throws: a bad token is a 401, never a 500.
+  async function authedOwnerUid(req) {
+    if (typeof verifyIdToken !== 'function') return ''
+    const token = bearerToken(req)
+    if (!token) return ''
+    try {
+      const decoded = await verifyIdToken(token)
+      return decoded && typeof decoded.uid === 'string' ? decoded.uid : ''
+    } catch {
+      return ''
+    }
+  }
+
+  async function handleWebsiteTokenMint(req, res, rawBody) {
+    if (typeof verifyIdToken !== 'function' || !tokenStore) {
+      return json(res, 404, { error: 'not found' })
+    }
+    const ownerUid = await authedOwnerUid(req)
+    if (!ownerUid) return json(res, 401, { error: 'unauthorized' })
+    if (!limiter.take(`api:${ownerUid}`)) {
+      return json(res, 429, { error: 'rate limited, retry later' })
+    }
+    const parsed = parseJsonBody(rawBody)
+    if (!parsed.ok) return json(res, 400, { error: parsed.error })
+    const label = String(parsed.body && parsed.body.label !== undefined ? parsed.body.label : 'Website').trim().slice(0, 80) || 'Website'
+    const rawToken = `wb_${crypto.randomBytes(24).toString('hex')}`
+    const record = await tokenStore.mint(ownerUid, { tokenHash: sha256Hex(rawToken), label })
+    // The raw token is returned exactly once; only its hash is stored.
+    return json(res, 201, { id: record.id, token: rawToken, label: record.label, createdAt: record.createdAt })
+  }
+
+  async function handleWebsiteTokenList(req, res) {
+    if (typeof verifyIdToken !== 'function' || !tokenStore) {
+      return json(res, 404, { error: 'not found' })
+    }
+    const ownerUid = await authedOwnerUid(req)
+    if (!ownerUid) return json(res, 401, { error: 'unauthorized' })
+    const tokens = await tokenStore.list(ownerUid)
+    return json(res, 200, { tokens })
+  }
+
+  async function handleWebsiteTokenRevoke(req, res, id) {
+    if (typeof verifyIdToken !== 'function' || !tokenStore) {
+      return json(res, 404, { error: 'not found' })
+    }
+    const ownerUid = await authedOwnerUid(req)
+    if (!ownerUid) return json(res, 401, { error: 'unauthorized' })
+    const ok = await tokenStore.revoke(ownerUid, id)
+    if (!ok) return json(res, 404, { error: 'not found' })
+    return json(res, 200, { revoked: true })
+  }
 
   async function handleShopify(req, res, rawBody) {
     const shop = req.headers['x-shopify-shop-domain'] || ''
@@ -219,6 +282,16 @@ function createServer({ config, store, deadLetters, deliveryStore = null, fetchF
         break
       }
     }
+    // Owner-minted tokens (Firestore-backed): doc id is the sha256 of
+    // the raw token, so this is one doc get — no query, no index.
+    if (!ownerUid && token && tokenStore) {
+      try {
+        const record = await tokenStore.findByHash(sha256Hex(token))
+        if (record) ownerUid = record.ownerUid
+      } catch {
+        return json(res, 500, { error: 'verification unavailable, please retry' })
+      }
+    }
     if (!ownerUid) return json(res, 401, { error: 'bad token' })
     const parsed = parseJsonBody(rawBody)
     if (!parsed.ok) return json(res, 400, { error: parsed.error })
@@ -300,6 +373,27 @@ function createServer({ config, store, deadLetters, deliveryStore = null, fetchF
       const retryMatch = path.match(/^\/ops\/dead-letters\/([^/]+)\/retry$/)
       if (req.method === 'POST' && retryMatch) {
         return handleOpsRetry(req, res, decodeURIComponent(retryMatch[1]))
+      }
+
+      // Owner-facing token API (ID-token auth; 404 when no verifier
+      // is wired, so memory-mode runs expose no such surface).
+      if (path === '/api/website-tokens') {
+        if (req.method === 'GET') return handleWebsiteTokenList(req, res)
+        if (req.method === 'POST') {
+          let rawBody
+          try {
+            rawBody = await readRawBody(req, config.maxBodyBytes)
+          } catch (error) {
+            if (error.code === 'TOO_LARGE') return json(res, 413, { error: 'body too large' })
+            return json(res, 400, { error: 'could not read body' })
+          }
+          return handleWebsiteTokenMint(req, res, rawBody)
+        }
+        return json(res, 404, { error: 'not found' })
+      }
+      const revokeMatch = path.match(/^\/api\/website-tokens\/([^/]+)$/)
+      if (req.method === 'DELETE' && revokeMatch) {
+        return handleWebsiteTokenRevoke(req, res, decodeURIComponent(revokeMatch[1]))
       }
 
       if (req.method !== 'POST' || !path.startsWith('/ingest/')) {
