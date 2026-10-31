@@ -118,6 +118,30 @@ test('api tokens: minted token ingests, list hides secrets, revoke kills it', as
   assert.equal(afterRevoke.status, 401)
 })
 
+test('api tokens: CORS preflight + headers on api responses', async t => {
+  const tokenStore = new MemoryWebsiteTokenStore()
+  const { server, base } = await startServer(baseConfig(), new MemoryStore(), tokenStore, verifyIdToken)
+  t.after(() => server.close())
+
+  const preflight = await fetch(base + '/api/website-tokens', {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://oumar9018-cmd.github.io',
+      'Access-Control-Request-Method': 'POST',
+      'Access-Control-Request-Headers': 'authorization, content-type',
+    },
+  })
+  assert.equal(preflight.status, 204)
+  assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://oumar9018-cmd.github.io')
+  assert.match(preflight.headers.get('access-control-allow-methods') || '', /POST/)
+
+  const list = await fetch(base + '/api/website-tokens', {
+    headers: { Authorization: 'Bearer good-id-token', Origin: 'https://oumar9018-cmd.github.io' },
+  })
+  assert.equal(list.status, 200)
+  assert.equal(list.headers.get('access-control-allow-origin'), 'https://oumar9018-cmd.github.io')
+})
+
 test('api tokens: no verifier wired means the routes 404', async t => {
   const tokenStore = new MemoryWebsiteTokenStore()
   const { server, base } = await startServer(baseConfig(), new MemoryStore(), tokenStore, null)

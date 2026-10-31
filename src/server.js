@@ -346,6 +346,25 @@ function createServer({ config, store, deadLetters, deliveryStore = null, tokenS
       const url = new URL(req.url || '/', 'http://localhost')
       const path = url.pathname
 
+      // CORS for the owner-facing /api routes ONLY. The SPA runs on
+      // GitHub Pages, so without these headers the browser blocks
+      // every /api call at preflight (Authorization + JSON content
+      // type are not safelisted) — which is exactly why the first
+      // live mint check failed while curl checks passed. Ingest
+      // routes are provider-to-server calls and need no CORS.
+      // The allowlist is exactly one origin: the Wynback SPA.
+      if (path.startsWith('/api/')) {
+        res.setHeader('Access-Control-Allow-Origin', 'https://oumar9018-cmd.github.io')
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+        res.setHeader('Vary', 'Origin')
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204)
+          res.end()
+          return
+        }
+      }
+
       if (req.method === 'GET' && path === '/health') {
         return json(res, 200, { ok: true })
       }
